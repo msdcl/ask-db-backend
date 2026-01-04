@@ -89,13 +89,22 @@ class DatabaseService {
     try {
       const pool = await this.getConnectionPool(databaseName);
 
+      // Validate table name exists to prevent SQL injection
+      const validTables = await this.getTablesInDatabase(databaseName);
+      if (!validTables.includes(tableName)) {
+        throw new NotFoundError(`Table '${tableName}' not found in database`);
+      }
+
+      // Use quoted identifier to safely include table name
+      const safeTableName = `"${tableName.replace(/"/g, '""')}"`;
+
       const countResult = await pool.query(
-        `SELECT COUNT(*) as total FROM ${tableName}`
+        `SELECT COUNT(*) as total FROM ${safeTableName}`
       );
       const total = parseInt(countResult.rows[0].total);
 
       const dataResult = await pool.query(
-        `SELECT * FROM ${tableName} LIMIT $1 OFFSET $2`,
+        `SELECT * FROM ${safeTableName} LIMIT $1 OFFSET $2`,
         [limit, offset]
       );
 
@@ -107,6 +116,9 @@ class DatabaseService {
       };
     } catch (error) {
       logger.error('Failed to fetch table data:', error);
+      if (error instanceof NotFoundError) {
+        throw error;
+      }
       throw new DatabaseError('Failed to retrieve table data');
     }
   }

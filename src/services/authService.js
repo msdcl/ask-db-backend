@@ -103,7 +103,8 @@ class AuthService {
 
     let decoded;
     try {
-      decoded = jwt.verify(refreshToken, config.jwt.secret);
+      // Verify using the refresh-specific secret
+      decoded = jwt.verify(refreshToken, config.jwt.refreshSecret);
     } catch (error) {
       throw new AuthenticationError('Invalid refresh token');
     }
@@ -147,7 +148,8 @@ class AuthService {
       expiresIn: config.jwt.expiresIn,
     });
 
-    const refreshToken = jwt.sign({ userId }, config.jwt.secret, {
+    // Use separate secret for refresh tokens to prevent token type confusion attacks
+    const refreshToken = jwt.sign({ userId }, config.jwt.refreshSecret, {
       expiresIn: config.jwt.refreshExpiresIn,
     });
 

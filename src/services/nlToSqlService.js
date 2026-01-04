@@ -95,9 +95,11 @@ SQL Query:`);
   }
 
   sanitizeSQL(sql) {
+    // Remove markdown code blocks
     sql = sql.replace(/```sql\n?/g, '').replace(/```\n?/g, '');
     sql = sql.trim();
 
+    // Remove trailing semicolon
     if (sql.endsWith(';')) {
       sql = sql.slice(0, -1);
     }
@@ -105,9 +107,26 @@ SQL Query:`);
     return sql;
   }
 
-  validateSQL(sql) {
-    const lowerSQL = sql.toLowerCase();
+  stripSQLComments(sql) {
+    // Remove single-line comments (-- comment)
+    let stripped = sql.replace(/--[^\n]*/g, '');
+    // Remove multi-line comments (/* comment */)
+    stripped = stripped.replace(/\/\*[\s\S]*?\*\//g, '');
+    return stripped;
+  }
 
+  validateSQL(sql) {
+    // Strip comments before validation to prevent bypass attempts
+    const strippedSQL = this.stripSQLComments(sql);
+    const normalizedSQL = strippedSQL.toLowerCase().replace(/\s+/g, ' ').trim();
+
+    // Check for multiple statements (potential injection)
+    if (sql.includes(';')) {
+      throw new ValidationError('Multiple SQL statements are not allowed');
+    }
+
+    // Dangerous keywords that should never appear as SQL commands
+    // Using word boundaries to avoid false positives (e.g., "dropdown" contains "drop")
     const dangerousKeywords = [
       'drop',
       'delete',
@@ -118,18 +137,37 @@ SQL Query:`);
       'create',
       'grant',
       'revoke',
+      'exec',
+      'execute',
+      'xp_',
+      'sp_',
+      'into outfile',
+      'into dumpfile',
+      'load_file',
+      'pg_read_file',
+      'pg_write_file',
+      'copy',
     ];
 
     for (const keyword of dangerousKeywords) {
-      if (lowerSQL.includes(keyword)) {
+      // Use word boundary regex to match whole words only
+      const regex = new RegExp(`\\b${keyword}\\b`, 'i');
+      if (regex.test(normalizedSQL)) {
         throw new ValidationError(
           `Query contains forbidden operation: ${keyword.toUpperCase()}`
         );
       }
     }
 
-    if (!lowerSQL.startsWith('select')) {
+    // Ensure query starts with SELECT (after stripping whitespace)
+    if (!normalizedSQL.startsWith('select ') && normalizedSQL !== 'select') {
       throw new ValidationError('Only SELECT queries are allowed');
+    }
+
+    // Check for UNION-based injection attempts with other statement types
+    const unionPattern = /\bunion\b.*\b(insert|update|delete|drop|alter|create)\b/i;
+    if (unionPattern.test(normalizedSQL)) {
+      throw new ValidationError('Invalid UNION query detected');
     }
   }
 
