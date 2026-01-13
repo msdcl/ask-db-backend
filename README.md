@@ -55,7 +55,7 @@ GET /api/v1/query/history
 - **Express.js**: Web framework
 - **PostgreSQL + PGVector**: Database with vector search
 - **LangChain**: AI orchestration
-- **OpenAI GPT-4**: Natural language understanding
+- **OpenAI (via LangChain)**: Natural language understanding
 - **JWT**: Authentication
 - **Winston**: Logging
 
@@ -67,3 +67,23 @@ GET /api/v1/query/history
 - Comprehensive error handling
 - Request validation
 - Query history tracking
+
+## Embedding Maintenance
+
+If you change `EMBEDDING_MODEL` or `EMBEDDING_DIMENSION`, run:
+
+```bash
+node scripts/migrate_embedding_dimension.js
+node scripts/regenerate_embeddings.js
+```
+
+## Environment Variables
+
+- `LLM_API_KEY`: API key for the LLM provider (OpenAI by default)
+- `LLM_PROVIDER`: `openai` or `google` (default `openai`)
+- `LLM_BASE_URL`: Optional OpenAI-compatible base URL (for hosted providers)
+- `LLM_LOG_FULL_KEY`: `true` to log full LLM API key at startup (default `false`, use with caution)
+- `LLM_MODEL`: Chat model name (default `gpt-4o-mini`)
+- `LLM_TEMPERATURE`: Sampling temperature (default `0`)
+- `EMBEDDING_MODEL`: Embedding model name (default `text-embedding-3-small`)
+- `EMBEDDING_DIMENSION`: Embedding vector dimension (default `1536`)

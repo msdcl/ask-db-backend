@@ -1,18 +1,11 @@
-import { ChatOpenAI } from '@langchain/openai';
 import { PromptTemplate } from '@langchain/core/prompts';
-import { config } from '../config/env.js';
 import { embeddingService } from './embeddingService.js';
 import { logger } from '../utils/logger.js';
 import { ExternalServiceError, ValidationError } from '../utils/errors.js';
+import { llmClient } from './llmClient.js';
 
 class NLToSQLService {
   constructor() {
-    this.llm = new ChatOpenAI({
-      openAIApiKey: config.openai.apiKey,
-      modelName: 'gpt-4-turbo-preview',
-      temperature: 0,
-    });
-
     this.sqlPromptTemplate = PromptTemplate.fromTemplate(`
 You are an expert PostgreSQL query generator. Convert the following natural language question into a valid PostgreSQL query.
 
@@ -31,14 +24,28 @@ Important Rules:
 Natural Language Question: {question}
 
 SQL Query:`);
+    this.intentPromptTemplate = PromptTemplate.fromTemplate(`
+Analyze this query and determine the best visualization type.
+
+Query: {question}
+
+Return ONLY one of these options:
+- table (for simple data listing)
+- bar_chart (for comparisons)
+- line_chart (for trends over time)
+- pie_chart (for proportions)
+- number (for single values or aggregates)
+
+Visualization Type:`);
   }
 
   async convertToSQL(naturalQuery, databaseConfigId, organizationId) {
     try {
-      const relevantTables = await embeddingService.findRelevantTables(
-        naturalQuery,
+      const queryEmbedding = await embeddingService.generateEmbedding(naturalQuery);
+      const relevantTables = await embeddingService.findRelevantTablesByEmbedding(
+        queryEmbedding,
         databaseConfigId,
-        3
+        10
       );
 
       if (relevantTables.length === 0) {
@@ -54,8 +61,7 @@ SQL Query:`);
         question: naturalQuery,
       });
 
-      const response = await this.llm.invoke(prompt);
-      let sqlQuery = response.content.trim();
+      let sqlQuery = await llmClient.generateText(prompt);
 
       sqlQuery = this.sanitizeSQL(sqlQuery);
 
@@ -64,6 +70,9 @@ SQL Query:`);
       logger.info('SQL generated successfully', {
         naturalQuery,
         sqlQuery,
+        databaseConfigId,
+        organizationId,
+        relevantTables: relevantTables.map((table) => table.tableName),
       });
 
       return {
@@ -82,14 +91,22 @@ SQL Query:`);
   buildSchemaContext(relevantTables) {
     return relevantTables
       .map((table) => {
+        let tableHeader = `Table: ${table.tableName}`;
+        if (table.tableDescription) {
+          tableHeader += ` - ${table.tableDescription}`;
+        }
+
         const columns = table.schemaInfo
-          .map(
-            (col) =>
-              `  - ${col.column_name}: ${col.data_type}${col.is_nullable === 'NO' ? ' (NOT NULL)' : ''}`
-          )
+          .map((col) => {
+            let columnInfo = `  - ${col.column_name}: ${col.data_type}${col.is_nullable === 'NO' ? ' (NOT NULL)' : ''}`;
+            if (col.column_description) {
+              columnInfo += ` - ${col.column_description}`;
+            }
+            return columnInfo;
+          })
           .join('\n');
 
-        return `Table: ${table.tableName}\nColumns:\n${columns}`;
+        return `${tableHeader}\nColumns:\n${columns}`;
       })
       .join('\n\n');
   }
@@ -173,21 +190,10 @@ SQL Query:`);
 
   async analyzeQueryIntent(naturalQuery) {
     try {
-      const analysisPrompt = `Analyze this query and determine the best visualization type.
-
-Query: ${naturalQuery}
-
-Return ONLY one of these options:
-- table (for simple data listing)
-- bar_chart (for comparisons)
-- line_chart (for trends over time)
-- pie_chart (for proportions)
-- number (for single values or aggregates)
-
-Visualization Type:`;
-
-      const response = await this.llm.invoke(analysisPrompt);
-      const visualizationType = response.content.trim().toLowerCase();
+      const prompt = await this.intentPromptTemplate.format({
+        question: naturalQuery,
+      });
+      const visualizationType = (await llmClient.generateText(prompt)).toLowerCase();
 
       const validTypes = ['table', 'bar_chart', 'line_chart', 'pie_chart', 'number'];
       if (validTypes.includes(visualizationType)) {

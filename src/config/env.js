@@ -19,7 +19,12 @@ const envSchema = z.object({
   JWT_EXPIRES_IN: z.string().default('24h'),
   JWT_REFRESH_EXPIRES_IN: z.string().default('7d'),
 
-  OPENAI_API_KEY: z.string().min(20),
+  LLM_API_KEY: z.string().min(20),
+  LLM_PROVIDER: z.enum(['openai', 'google']).default('openai'),
+  LLM_MODEL: z.string().default('gpt-4o-mini'),
+  LLM_TEMPERATURE: z.string().transform(Number).default('0'),
+  LLM_BASE_URL: z.string().optional(),
+  LLM_LOG_FULL_KEY: z.string().transform((val) => val === 'true').default('false'),
 
   RATE_LIMIT_WINDOW_MS: z.string().transform(Number).default('900000'),
   RATE_LIMIT_MAX_REQUESTS: z.string().transform(Number).default('100'),
@@ -29,7 +34,7 @@ const envSchema = z.object({
   LOG_LEVEL: z.enum(['error', 'warn', 'info', 'debug']).default('info'),
   LOG_FILE_PATH: z.string().default('./logs'),
 
-  EMBEDDING_MODEL: z.string().default('text-embedding-ada-002'),
+  EMBEDDING_MODEL: z.string().default('text-embedding-3-small'),
   EMBEDDING_DIMENSION: z.string().transform(Number).default('1536'),
 });
 
@@ -62,8 +67,13 @@ export const config = {
     refreshExpiresIn: env.JWT_REFRESH_EXPIRES_IN,
   },
 
-  openai: {
-    apiKey: env.OPENAI_API_KEY,
+  llm: {
+    apiKey: env.LLM_API_KEY,
+    provider: env.LLM_PROVIDER,
+    model: env.LLM_MODEL,
+    temperature: env.LLM_TEMPERATURE,
+    baseUrl: env.LLM_BASE_URL,
+    logFullKey: env.LLM_LOG_FULL_KEY,
   },
 
   rateLimit: {

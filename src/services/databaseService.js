@@ -125,8 +125,6 @@ class DatabaseService {
 
   async executeQuery(databaseConfigId, organizationId, sqlQuery) {
     const startTime = Date.now();
-    let status = 'success';
-    let errorMessage = null;
 
     try {
       const configResult = await database.query(
@@ -181,12 +179,8 @@ class DatabaseService {
         executionTime,
       };
     } catch (error) {
-      status = 'error';
-      errorMessage = error.message;
       logger.error('Query execution failed:', error);
       throw new DatabaseError(`Query execution failed: ${error.message}`);
-    } finally {
-      const executionTime = Date.now() - startTime;
     }
   }
 

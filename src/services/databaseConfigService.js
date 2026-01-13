@@ -1,6 +1,7 @@
 import { database } from '../config/database.js';
 import { ValidationError, NotFoundError } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
+import { embeddingService } from './embeddingService.js';
 import pg from 'pg';
 
 const { Pool } = pg;
@@ -178,7 +179,28 @@ class DatabaseConfigService {
             );
           }
 
+          // Generate embedding for the new table
+          try {
+            await embeddingService.generateAndStoreEmbedding(
+              databaseConfigId,
+              tableName,
+              schemaInfo,
+              null // No description yet
+            );
+          } catch (embeddingError) {
+            logger.warn(`Failed to generate embedding for table ${tableName}:`, embeddingError);
+            // Continue indexing even if embedding fails
+          }
+
           indexedCount++;
+        } else {
+          // Table exists, but schema might have changed - regenerate embedding
+          try {
+            await embeddingService.regenerateTableEmbedding(databaseConfigId, tableName);
+          } catch (embeddingError) {
+            logger.warn(`Failed to regenerate embedding for table ${tableName}:`, embeddingError);
+            // Continue indexing even if embedding fails
+          }
         }
       }
 
@@ -226,9 +248,9 @@ class DatabaseConfigService {
   }
 
   async updateTableDescription(tableSchemaId, tableDescription, organizationId) {
-    // Verify table belongs to organization
+    // Verify table belongs to organization and get table info
     const verifyResult = await database.query(
-      `SELECT ts.id
+      `SELECT ts.id, ts.database_config_id, ts.table_name
        FROM table_schemas ts
        JOIN database_configurations dc ON ts.database_config_id = dc.id
        WHERE ts.id = $1 AND dc.organization_id = $2`,
@@ -238,6 +260,8 @@ class DatabaseConfigService {
     if (verifyResult.rows.length === 0) {
       throw new NotFoundError('Table not found or access denied');
     }
+
+    const tableInfo = verifyResult.rows[0];
 
     const result = await database.query(
       `UPDATE table_schemas
@@ -247,13 +271,24 @@ class DatabaseConfigService {
       [tableDescription, tableSchemaId]
     );
 
+    // Regenerate embedding with updated description
+    try {
+      await embeddingService.regenerateTableEmbedding(
+        tableInfo.database_config_id,
+        tableInfo.table_name
+      );
+    } catch (embeddingError) {
+      logger.warn(`Failed to regenerate embedding after table description update:`, embeddingError);
+      // Continue even if embedding fails
+    }
+
     return result.rows[0];
   }
 
   async updateColumnDescription(tableSchemaId, columnName, columnDescription, organizationId) {
-    // Verify table belongs to organization
+    // Verify table belongs to organization and get table info
     const verifyResult = await database.query(
-      `SELECT ts.id
+      `SELECT ts.id, ts.database_config_id, ts.table_name
        FROM table_schemas ts
        JOIN database_configurations dc ON ts.database_config_id = dc.id
        WHERE ts.id = $1 AND dc.organization_id = $2`,
@@ -263,6 +298,8 @@ class DatabaseConfigService {
     if (verifyResult.rows.length === 0) {
       throw new NotFoundError('Table not found or access denied');
     }
+
+    const tableInfo = verifyResult.rows[0];
 
     const result = await database.query(
       `UPDATE column_metadata
@@ -274,6 +311,17 @@ class DatabaseConfigService {
 
     if (result.rows.length === 0) {
       throw new NotFoundError('Column not found');
+    }
+
+    // Regenerate embedding with updated column description
+    try {
+      await embeddingService.regenerateTableEmbedding(
+        tableInfo.database_config_id,
+        tableInfo.table_name
+      );
+    } catch (embeddingError) {
+      logger.warn(`Failed to regenerate embedding after column description update:`, embeddingError);
+      // Continue even if embedding fails
     }
 
     return result.rows[0];
