@@ -138,10 +138,16 @@ class DatabaseConfigService {
       const tables = tablesResult.rows;
       let indexedCount = 0;
 
+      // Extract foreign key relationships for all tables
+      const fkRelationships = await this.extractForeignKeys(pool);
+
+      // Extract primary keys for all tables
+      const primaryKeys = await this.extractPrimaryKeys(pool);
+
       for (const table of tables) {
         const tableName = table.table_name;
 
-        // Get table schema
+        // Get table schema with enhanced info
         const schemaResult = await pool.query(`
           SELECT column_name, data_type, is_nullable, column_default
           FROM information_schema.columns
@@ -158,6 +164,8 @@ class DatabaseConfigService {
           [databaseConfigId, tableName]
         );
 
+        let tableSchemaId;
+
         if (existingSchema.rows.length === 0) {
           // Insert new table schema
           const insertResult = await database.query(
@@ -167,42 +175,73 @@ class DatabaseConfigService {
             [databaseConfigId, tableName, JSON.stringify(schemaInfo)]
           );
 
-          const tableSchemaId = insertResult.rows[0].id;
+          tableSchemaId = insertResult.rows[0].id;
+          indexedCount++;
+        } else {
+          tableSchemaId = existingSchema.rows[0].id;
+        }
 
-          // Insert column metadata
-          for (const column of schemaInfo) {
-            await database.query(
-              `INSERT INTO column_metadata (table_schema_id, column_name, data_type, is_nullable)
-               VALUES ($1, $2, $3, $4)
-               ON CONFLICT (table_schema_id, column_name) DO NOTHING`,
-              [tableSchemaId, column.column_name, column.data_type, column.is_nullable === 'YES']
-            );
-          }
+        // Get table's primary key columns
+        const tablePKs = primaryKeys[tableName] || [];
 
-          // Generate embedding for the new table
-          try {
+        // Get table's foreign key info
+        const tableFKs = fkRelationships.filter(fk => fk.from_table === tableName);
+
+        // Insert/update column metadata with enhanced info
+        for (const column of schemaInfo) {
+          const isPK = tablePKs.includes(column.column_name);
+          const fkInfo = tableFKs.find(fk => fk.from_column === column.column_name);
+          const fkRef = fkInfo ? `${fkInfo.to_table}.${fkInfo.to_column}` : null;
+
+          // Infer semantic type and aggregation hint
+          const semanticType = this.inferSemanticType(column, isPK, !!fkRef);
+          const aggregationHint = this.inferAggregationHint(semanticType, column.column_name);
+
+          await database.query(
+            `INSERT INTO column_metadata
+             (table_schema_id, column_name, data_type, is_nullable, is_primary_key, foreign_key_ref, semantic_type, aggregation_hint)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             ON CONFLICT (table_schema_id, column_name)
+             DO UPDATE SET
+               data_type = EXCLUDED.data_type,
+               is_nullable = EXCLUDED.is_nullable,
+               is_primary_key = EXCLUDED.is_primary_key,
+               foreign_key_ref = EXCLUDED.foreign_key_ref,
+               semantic_type = COALESCE(column_metadata.semantic_type, EXCLUDED.semantic_type),
+               aggregation_hint = COALESCE(column_metadata.aggregation_hint, EXCLUDED.aggregation_hint),
+               updated_at = CURRENT_TIMESTAMP`,
+            [
+              tableSchemaId,
+              column.column_name,
+              column.data_type,
+              column.is_nullable === 'YES',
+              isPK,
+              fkRef,
+              semanticType,
+              aggregationHint
+            ]
+          );
+        }
+
+        // Generate embedding for the table
+        try {
+          if (existingSchema.rows.length === 0) {
             await embeddingService.generateAndStoreEmbedding(
               databaseConfigId,
               tableName,
               schemaInfo,
-              null // No description yet
+              null
             );
-          } catch (embeddingError) {
-            logger.warn(`Failed to generate embedding for table ${tableName}:`, embeddingError);
-            // Continue indexing even if embedding fails
-          }
-
-          indexedCount++;
-        } else {
-          // Table exists, but schema might have changed - regenerate embedding
-          try {
+          } else {
             await embeddingService.regenerateTableEmbedding(databaseConfigId, tableName);
-          } catch (embeddingError) {
-            logger.warn(`Failed to regenerate embedding for table ${tableName}:`, embeddingError);
-            // Continue indexing even if embedding fails
           }
+        } catch (embeddingError) {
+          logger.warn(`Failed to generate embedding for table ${tableName}:`, embeddingError);
         }
       }
+
+      // Store foreign key relationships in table_relationships
+      await this.storeForeignKeyRelationships(databaseConfigId, fkRelationships);
 
       await pool.end();
       logger.info(`Indexed ${indexedCount} tables for database config ${databaseConfigId}`);
@@ -210,12 +249,149 @@ class DatabaseConfigService {
       return {
         totalTables: tables.length,
         indexedTables: indexedCount,
-        message: `Successfully indexed ${indexedCount} new tables`
+        relationshipsFound: fkRelationships.length,
+        message: `Successfully indexed ${indexedCount} new tables with ${fkRelationships.length} relationships`
       };
     } catch (error) {
       await pool.end();
       logger.error('Database indexing failed:', error);
       throw error;
+    }
+  }
+
+  async extractForeignKeys(pool) {
+    const result = await pool.query(`
+      SELECT
+        tc.table_name AS from_table,
+        kcu.column_name AS from_column,
+        ccu.table_name AS to_table,
+        ccu.column_name AS to_column
+      FROM information_schema.table_constraints AS tc
+      JOIN information_schema.key_column_usage AS kcu
+        ON tc.constraint_name = kcu.constraint_name
+        AND tc.table_schema = kcu.table_schema
+      JOIN information_schema.constraint_column_usage AS ccu
+        ON ccu.constraint_name = tc.constraint_name
+        AND ccu.table_schema = tc.table_schema
+      WHERE tc.constraint_type = 'FOREIGN KEY'
+        AND tc.table_schema = 'public'
+    `);
+
+    return result.rows;
+  }
+
+  async extractPrimaryKeys(pool) {
+    const result = await pool.query(`
+      SELECT
+        tc.table_name,
+        kcu.column_name
+      FROM information_schema.table_constraints AS tc
+      JOIN information_schema.key_column_usage AS kcu
+        ON tc.constraint_name = kcu.constraint_name
+        AND tc.table_schema = kcu.table_schema
+      WHERE tc.constraint_type = 'PRIMARY KEY'
+        AND tc.table_schema = 'public'
+    `);
+
+    // Group by table name
+    const pkMap = {};
+    for (const row of result.rows) {
+      if (!pkMap[row.table_name]) {
+        pkMap[row.table_name] = [];
+      }
+      pkMap[row.table_name].push(row.column_name);
+    }
+
+    return pkMap;
+  }
+
+  async storeForeignKeyRelationships(databaseConfigId, fkRelationships) {
+    for (const fk of fkRelationships) {
+      await database.query(
+        `INSERT INTO table_relationships
+         (database_config_id, from_table, from_column, to_table, to_column, relationship_type)
+         VALUES ($1, $2, $3, $4, $5, 'foreign_key')
+         ON CONFLICT (database_config_id, from_table, from_column, to_table, to_column) DO NOTHING`,
+        [databaseConfigId, fk.from_table, fk.from_column, fk.to_table, fk.to_column]
+      );
+    }
+  }
+
+  inferSemanticType(column, isPrimaryKey, isForeignKey) {
+    const name = column.column_name.toLowerCase();
+    const type = column.data_type.toLowerCase();
+
+    // Primary/Foreign key detection
+    if (isPrimaryKey) return 'PK';
+    if (isForeignKey) return 'FK';
+
+    // ID detection (non-PK/FK)
+    if (name === 'id' || name.endsWith('_id')) return 'ID';
+
+    // Money/Price detection
+    if (name.includes('price') || name.includes('amount') || name.includes('cost') ||
+        name.includes('revenue') || name.includes('total') || name.includes('fee') ||
+        name.includes('salary') || name.includes('payment') || name.includes('balance')) {
+      return 'MONEY';
+    }
+
+    // Quantity detection
+    if (name.includes('quantity') || name.includes('count') || name.includes('qty') ||
+        name.includes('num_') || name.includes('number_of') || name.includes('stock')) {
+      return 'QUANTITY';
+    }
+
+    // Percentage/Rate detection
+    if (name.includes('rate') || name.includes('percent') || name.includes('ratio') ||
+        name.includes('discount') || name.includes('tax')) {
+      return 'PERCENTAGE';
+    }
+
+    // Date/Time detection
+    if (name.includes('date') || name.includes('_at') || name.includes('time') ||
+        name.includes('yymmdd') || type.includes('timestamp') || type.includes('date')) {
+      return 'DATE';
+    }
+
+    // Status/Category detection
+    if (name.includes('status') || name.includes('type') || name.includes('category') ||
+        name.includes('state') || name.includes('level') || name.includes('tier')) {
+      return 'CATEGORICAL';
+    }
+
+    // Name/Text detection
+    if (name.includes('name') || name.includes('title') || name.includes('label') ||
+        name.includes('description') || name.includes('email') || name.includes('phone')) {
+      return 'TEXT';
+    }
+
+    // Boolean detection
+    if (type === 'boolean' || name.startsWith('is_') || name.startsWith('has_') ||
+        name.startsWith('can_') || name.includes('_flag')) {
+      return 'BOOLEAN';
+    }
+
+    return 'OTHER';
+  }
+
+  inferAggregationHint(semanticType, columnName) {
+    switch (semanticType) {
+      case 'MONEY':
+      case 'QUANTITY':
+        return 'SUM';
+      case 'PERCENTAGE':
+        return 'AVG';
+      case 'DATE':
+      case 'CATEGORICAL':
+        return 'GROUP_BY';
+      case 'PK':
+      case 'FK':
+      case 'ID':
+        return 'COUNT';
+      case 'BOOLEAN':
+        return 'COUNT';
+      default:
+        return 'NONE';
     }
   }
 

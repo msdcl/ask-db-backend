@@ -1,5 +1,9 @@
 import { body, param, query } from 'express-validator';
 
+const MAX_INSTRUCTION_WORDS = 50;
+
+const countWords = (text) => text.trim().split(/\s+/).filter(Boolean).length;
+
 export const executeQueryValidator = [
   body('query')
     .notEmpty()
@@ -8,6 +12,19 @@ export const executeQueryValidator = [
     .withMessage('Query must be a string')
     .isLength({ min: 3, max: 1000 })
     .withMessage('Query must be between 3 and 1000 characters'),
+  body('instruction')
+    .optional({ nullable: true })
+    .isString()
+    .withMessage('Instruction must be a string')
+    .custom((value) => {
+      if (!value || !value.trim()) {
+        return true;
+      }
+      if (countWords(value) > MAX_INSTRUCTION_WORDS) {
+        throw new Error(`Instruction must be ${MAX_INSTRUCTION_WORDS} words or less`);
+      }
+      return true;
+    }),
   body('databaseConfigId')
     .notEmpty()
     .withMessage('Database config ID is required')

@@ -125,7 +125,7 @@ class Database {
         );
       `);
 
-      // Column metadata table
+      // Column metadata table with enhanced fields
       await client.query(`
         CREATE TABLE IF NOT EXISTS column_metadata (
           id SERIAL PRIMARY KEY,
@@ -134,9 +134,78 @@ class Database {
           column_description TEXT,
           data_type VARCHAR(100),
           is_nullable BOOLEAN,
+          is_primary_key BOOLEAN DEFAULT FALSE,
+          foreign_key_ref VARCHAR(255),
+          semantic_type VARCHAR(50),
+          aggregation_hint VARCHAR(50),
+          sample_values JSONB,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
           updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
           UNIQUE(table_schema_id, column_name)
+        );
+      `);
+      await client.query(
+        `ALTER TABLE column_metadata
+         ADD COLUMN IF NOT EXISTS column_description TEXT`
+      );
+      await client.query(
+        `ALTER TABLE column_metadata
+         ADD COLUMN IF NOT EXISTS data_type VARCHAR(100)`
+      );
+      await client.query(
+        `ALTER TABLE column_metadata
+         ADD COLUMN IF NOT EXISTS is_nullable BOOLEAN`
+      );
+      await client.query(
+        `ALTER TABLE column_metadata
+         ADD COLUMN IF NOT EXISTS is_primary_key BOOLEAN DEFAULT FALSE`
+      );
+      await client.query(
+        `ALTER TABLE column_metadata
+         ADD COLUMN IF NOT EXISTS foreign_key_ref VARCHAR(255)`
+      );
+      await client.query(
+        `ALTER TABLE column_metadata
+         ADD COLUMN IF NOT EXISTS semantic_type VARCHAR(50)`
+      );
+      await client.query(
+        `ALTER TABLE column_metadata
+         ADD COLUMN IF NOT EXISTS aggregation_hint VARCHAR(50)`
+      );
+      await client.query(
+        `ALTER TABLE column_metadata
+         ADD COLUMN IF NOT EXISTS sample_values JSONB`
+      );
+
+      // Table relationships for FK tracking
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS table_relationships (
+          id SERIAL PRIMARY KEY,
+          database_config_id INTEGER NOT NULL REFERENCES database_configurations(id) ON DELETE CASCADE,
+          from_table VARCHAR(255) NOT NULL,
+          from_column VARCHAR(255) NOT NULL,
+          to_table VARCHAR(255) NOT NULL,
+          to_column VARCHAR(255) NOT NULL,
+          relationship_type VARCHAR(50) DEFAULT 'foreign_key',
+          cardinality VARCHAR(20),
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(database_config_id, from_table, from_column, to_table, to_column)
+        );
+      `);
+
+      // Query examples for few-shot learning
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS query_examples (
+          id SERIAL PRIMARY KEY,
+          database_config_id INTEGER REFERENCES database_configurations(id) ON DELETE CASCADE,
+          natural_query TEXT NOT NULL,
+          intent_type VARCHAR(50),
+          generated_sql TEXT NOT NULL,
+          tables_used JSONB,
+          was_successful BOOLEAN DEFAULT TRUE,
+          feedback_score INTEGER,
+          embedding vector(${config.embedding.dimension}),
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
       `);
 
@@ -167,6 +236,24 @@ class Database {
 
       await client.query(`
         CREATE INDEX IF NOT EXISTS idx_query_history_created_at ON query_history(created_at DESC);
+      `);
+
+      // Indexes for table_relationships
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_table_relationships_from
+        ON table_relationships(database_config_id, from_table);
+      `);
+
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_table_relationships_to
+        ON table_relationships(database_config_id, to_table);
+      `);
+
+      // Index for query_examples embedding search
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_query_examples_embedding
+        ON query_examples USING ivfflat (embedding vector_cosine_ops)
+        WITH (lists = 100);
       `);
 
       logger.info('Database schema initialized successfully');

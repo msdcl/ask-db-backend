@@ -41,6 +41,7 @@ export const errorHandler = (err, req, res, next) => {
   res.status(statusCode).json({
     success: false,
     error: message,
+    ...(error.generatedSql && { data: { sql: error.generatedSql } }),
     ...(config.env === 'development' && { stack: error.stack }),
   });
 };

@@ -1,5 +1,4 @@
 import { nlToSqlService } from '../services/nlToSqlService.js';
-import { databaseService } from '../services/databaseService.js';
 import { database } from '../config/database.js';
 import { logger } from '../utils/logger.js';
 
@@ -10,30 +9,30 @@ export const executeNaturalQuery = async (req, res, next) => {
   let errorMessage = null;
 
   try {
-    const { query, databaseConfigId } = req.body;
+    const { query, databaseConfigId, instruction } = req.body;
     const userId = req.user.id;
     const organizationId = req.user.organizationId;
+    const trimmedInstruction = instruction?.trim() || '';
 
     logger.info('Processing natural language query', {
       userId,
       query,
+      instruction: trimmedInstruction || null,
       databaseConfigId,
     });
 
-    const { sql, relevantTables } = await nlToSqlService.convertToSQL(
+    const { sql, result, rowCount, relevantTables } = await nlToSqlService.askQuestion(
       query,
       databaseConfigId,
-      organizationId
+      organizationId,
+      trimmedInstruction
     );
 
     sqlQuery = sql;
 
-    const visualizationType = await nlToSqlService.analyzeQueryIntent(query);
-
-    const queryResult = await databaseService.executeQuery(
-      databaseConfigId,
-      organizationId,
-      sql
+    const visualizationType = await nlToSqlService.analyzeQueryIntent(
+      query,
+      trimmedInstruction
     );
 
     const executionTime = Date.now() - startTime;
@@ -42,7 +41,7 @@ export const executeNaturalQuery = async (req, res, next) => {
       `INSERT INTO query_history
        (user_id, database_config_id, natural_query, generated_sql, execution_status, execution_time_ms, result_count)
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [userId, databaseConfigId, query, sql, executionStatus, executionTime, queryResult.rowCount]
+      [userId, databaseConfigId, query, sql, executionStatus, executionTime, rowCount]
     );
 
     res.status(200).json({
@@ -50,8 +49,8 @@ export const executeNaturalQuery = async (req, res, next) => {
       data: {
         query,
         sql,
-        result: queryResult.data,
-        rowCount: queryResult.rowCount,
+        result,
+        rowCount,
         executionTime,
         visualizationType,
         relevantTables,
@@ -60,6 +59,13 @@ export const executeNaturalQuery = async (req, res, next) => {
   } catch (error) {
     executionStatus = 'error';
     errorMessage = error.message;
+    if (!sqlQuery && error.generatedSql) {
+      sqlQuery = error.generatedSql;
+    }
+
+    if (sqlQuery) {
+      error.generatedSql = sqlQuery;
+    }
 
     if (sqlQuery && req.user) {
       await database.query(
